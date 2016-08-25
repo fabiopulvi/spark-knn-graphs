@@ -161,7 +161,7 @@ public class streaming_fabio_spam_sliding_window {
             public Void call(JavaRDD<String> rdd) throws Exception {
 // TODO Auto-generated method stub
                 if (rdd != null) {
-                    List<String> result = rdd.collect();
+                    List<String> result = rdd.collect(); // =(
                    // data3.addAll(result);
                     for (String s: result) {
                         Node<String> node = new Node<String>(String.valueOf(accum_seq.value()), s);

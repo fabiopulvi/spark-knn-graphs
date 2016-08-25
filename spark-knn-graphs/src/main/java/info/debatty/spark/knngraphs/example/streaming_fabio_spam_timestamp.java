@@ -175,7 +175,7 @@ public class streaming_fabio_spam_timestamp {
             public Void call(JavaRDD<String> rdd) throws Exception {
 // TODO Auto-generated method stub
                 if (rdd != null) {
-                    List<String> result = rdd.collect();
+                    List<String> result = rdd.collect(); // =(
                     data3.addAll(result);
                     for (String s : result) {
                         java.util.Date date = new java.util.Date();

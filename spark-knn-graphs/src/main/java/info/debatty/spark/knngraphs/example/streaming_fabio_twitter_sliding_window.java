@@ -176,7 +176,7 @@ public class streaming_fabio_twitter_sliding_window {
             public Void call(JavaPairRDD<String, String> rdd) throws Exception {
 // TODO Auto-generated method stub
                 if (rdd != null) {
-                    List<Tuple2<String, String>> result = rdd.collect();
+                    List<Tuple2<String, String>> result = rdd.collect(); // =(
                     data3.addAll(result);
                     for (Tuple2<String,String> tuple: result) {
                         Node<String> node = new Node<String>(String.valueOf(accum_seq.value()), tuple._1);
