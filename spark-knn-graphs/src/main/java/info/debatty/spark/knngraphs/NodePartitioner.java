@@ -34,23 +34,17 @@ import org.apache.spark.Partitioner;
 public class NodePartitioner extends Partitioner {
     private final int partitions;
 
-    /**
-     * 
-     * @param partitions
-     */
-    public NodePartitioner(final int partitions) {
+    public NodePartitioner(int partitions) {
         this.partitions = partitions;
     }
 
     @Override
-    public final int numPartitions() {
+    public int numPartitions() {
         return partitions;
     }
 
     @Override
-    public final int getPartition(final Object obj) {
-        Node node = (Node) obj;
-        return (Integer) node.getAttribute(
-                BalancedKMedoidsPartitioner.PARTITION_KEY);
+    public int getPartition(Object node) {
+        return ((Integer) ((Node) node).getAttribute(BalancedKMedoidsPartitioner.PARTITION_KEY)) % partitions;
     }
 }

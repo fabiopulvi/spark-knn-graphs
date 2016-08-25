@@ -27,9 +27,7 @@ import info.debatty.java.graphs.Graph;
 import info.debatty.java.graphs.NeighborList;
 import info.debatty.java.graphs.Node;
 import info.debatty.java.graphs.SimilarityInterface;
-import info.debatty.java.graphs.StatisticsContainer;
 import java.util.List;
-import org.apache.spark.Accumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.Function;
@@ -42,21 +40,6 @@ import org.apache.spark.api.java.function.Function;
 public class ApproximateSearch<T> {
 
     private static final double DEFAULT_IMBALANCE = 1.1;
-
-    /**
-     * Default speedup compared to exhaustive search.
-     */
-    public static final int DEFAULT_SPEEDUP = 10;
-
-    /**
-     * Default number of random jumps per node when searching.
-     */
-    public static final int DEFAULT_JUMPS = 2;
-
-    /**
-     * Default value for search expansion parameter.
-     */
-    public static final double DEFAULT_EXPANSION = 1.2;
 
     private JavaRDD<Graph<T>> distributed_graph;
     private final BalancedKMedoidsPartitioner partitioner;
@@ -101,21 +84,13 @@ public class ApproximateSearch<T> {
 
         // Partition the graph
         this.partitioner = new BalancedKMedoidsPartitioner();
-        partitioner.setIterations(partitioning_iterations);
-        partitioner.setPartitions(partitioning_medoids);
-        partitioner.setSimilarity(similarity);
-        partitioner.setImbalance(imbalance);
+        partitioner.iterations = partitioning_iterations;
+        partitioner.partitions = partitioning_medoids;
+        partitioner.similarity = similarity;
+        partitioner.imbalance = imbalance;
 
         this.distributed_graph = partitioner.partition(graph);
         this.distributed_graph.cache();
-        this.distributed_graph.count();
-    }
-
-    /**
-     * Unpersist the internal cached RDD.
-     */
-    public final void clean() {
-        distributed_graph.unpersist(true);
     }
 
     /**
@@ -131,7 +106,7 @@ public class ApproximateSearch<T> {
      * @return
      */
     public final List<Node<T>> getMedoids() {
-        return partitioner.getMedoids();
+        return partitioner.medoids;
     }
 
     /**
@@ -139,84 +114,25 @@ public class ApproximateSearch<T> {
      * @param node
      * @param counts
      */
-    public final void assign(final Node<T> node, final long[] counts) {
+    public final void assign(Node<T> node, long[] counts) {
         partitioner.assign(node, counts);
     }
 
     /**
-     * Fast distributed search with default number of random jumps (2) and
-     * expansion (1.2).
+     *
      * @param query
      * @param k
      * @param speedup
      * @return
      */
-   public final NeighborList search(
+    public final NeighborList search(
             final Node<T> query,
             final int k,
             final double speedup) {
-       return search(query, k, speedup, DEFAULT_JUMPS, DEFAULT_EXPANSION);
-   }
-
-   /**
-    * Fast distributed search with default speedup compared to exhaustive search
-    * (10), number of random jumps (2) and expansion (1.2).
-    * @param query
-    * @param k
-    * @return
-    */
-   public final NeighborList search(
-            final Node<T> query,
-            final int k) {
-       return search(query, k, DEFAULT_SPEEDUP);
-   }
-
-   /**
-     *
-     * @param query
-     * @param k
-     * @param speedup
-     * @param random_jumps
-     * @param expansion
-     * @return
-     */
-    public final NeighborList search(
-            final Node<T> query,
-            final int k,
-            final double speedup,
-            final int random_jumps,
-            final double expansion) {
-
-        return search(query, k, speedup, random_jumps, expansion, null);
-    }
-
-    /**
-     *
-     * @param query
-     * @param k
-     * @param speedup
-     * @param random_jumps
-     * @param expansion
-     * @param stats_accumulator
-     * @return
-     */
-    public final NeighborList search(
-            final Node<T> query,
-            final int k,
-            final double speedup,
-            final int random_jumps,
-            final double expansion,
-            final Accumulator<StatisticsContainer> stats_accumulator) {
 
         JavaRDD<NeighborList> candidates_neighborlists
                 = distributed_graph.map(
-                        new DistributedSearch(
-                                query,
-                                k,
-                                speedup,
-                                random_jumps,
-                                expansion,
-                                stats_accumulator));
+                        new DistributedSearch(query, k, speedup));
 
         NeighborList final_neighborlist = new NeighborList(k);
         for (NeighborList nl : candidates_neighborlists.collect()) {
@@ -253,42 +169,17 @@ class DistributedSearch<T>
     private final double speedup;
     private final int k;
     private final Node<T> query;
-    private final int random_jumps;
-    private final double expansion;
-    private final Accumulator<StatisticsContainer> stats_accumulator;
 
-    DistributedSearch(
-            final Node<T> query,
-            final int k,
-            final double speedup,
-            final int random_jumps,
-            final double expansion,
-            final Accumulator<StatisticsContainer> stats_accumulator) {
-
+    DistributedSearch(final Node<T> query, final int k, final double speedup) {
         this.query = query;
         this.k = k;
         this.speedup = speedup;
-        this.random_jumps = random_jumps;
-        this.expansion = expansion;
-        this.stats_accumulator = stats_accumulator;
     }
 
     public NeighborList call(final Graph<T> local_graph) throws Exception {
-
-        StatisticsContainer local_stats = new StatisticsContainer();
-
-        NeighborList local_results = local_graph.fastSearch(
+        return local_graph.fastSearch(
                 query.value,
                 k,
-                speedup,
-                random_jumps,
-                expansion,
-                local_stats);
-
-        if (stats_accumulator != null) {
-            stats_accumulator.add(local_stats);
-        }
-
-        return local_results;
+                speedup);
     }
 }

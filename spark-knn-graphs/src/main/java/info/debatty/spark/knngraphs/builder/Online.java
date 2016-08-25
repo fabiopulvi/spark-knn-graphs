@@ -28,7 +28,6 @@ import info.debatty.java.graphs.Neighbor;
 import info.debatty.java.graphs.NeighborList;
 import info.debatty.java.graphs.Node;
 import info.debatty.java.graphs.SimilarityInterface;
-import info.debatty.java.graphs.StatisticsContainer;
 import info.debatty.spark.knngraphs.ApproximateSearch;
 import info.debatty.spark.knngraphs.BalancedKMedoidsPartitioner;
 import java.security.InvalidParameterException;
@@ -37,7 +36,6 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import org.apache.spark.Accumulator;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -53,16 +51,19 @@ import scala.Tuple2;
  */
 public class Online<T> {
 
-    private static final int DEFAULT_PARTITIONING_ITERATIONS = 5;
-    private static final int DEFAULT_UPDATE_DEPTH = 2;
+    /**
+     * Key used to store the sequence number of the nodes. Used by the window
+     * algorithm to remove the nodes.
+     */
+    public static final String NODE_SEQUENCE_KEY = "ONLINE_SEQ_KEY";
+
+    private static final int PARTITIONING_ITERATIONS = 5;
+    private static final int DEFAULT_SEARCH_SPEEDUP = 4;
     private static final double DEFAULT_MEDOID_UPDATE_RATIO = 0.1;
 
     // Number of nodes to add before performing a checkpoint
     // (to strip RDD DAG)
-    private static final int ITERATIONS_BEFORE_CHECKPOINT = 100;
-
-    // Number of RDD's to cache
-    private static final int RDDS_TO_CACHE = 3;
+    private static final int ITERATIONS_BETWEEN_CHECKPOINTS = 100;
 
     // the search algorithm also contains a reference to the current graph
     private final ApproximateSearch<T> searcher;
@@ -74,14 +75,10 @@ public class Online<T> {
     private final long[] partitions_size;
     private final LinkedList<JavaRDD<Graph<T>>> previous_rdds;
 
-    private double search_speedup = ApproximateSearch.DEFAULT_SPEEDUP;
-    private int search_random_jumps = ApproximateSearch.DEFAULT_JUMPS;
-    private double search_expansion = ApproximateSearch.DEFAULT_EXPANSION;
-
+    private int search_speedup = DEFAULT_SEARCH_SPEEDUP;
     private long nodes_added_or_removed;
     private long nodes_before_update_medoids;
-    private final JavaSparkContext spark_context;
-    private int update_depth = DEFAULT_UPDATE_DEPTH;
+    private int window_size = 0;
 
     /**
      *
@@ -98,32 +95,6 @@ public class Online<T> {
             final JavaPairRDD<Node<T>, NeighborList> initial_graph,
             final int partitioning_medoids) {
 
-        this(
-                k,
-                similarity,
-                sc,
-                initial_graph,
-                partitioning_medoids,
-                DEFAULT_PARTITIONING_ITERATIONS);
-    }
-
-    /**
-     *
-     * @param k
-     * @param similarity
-     * @param sc
-     * @param initial_graph
-     * @param partitioning_medoids
-     * @param partitioning_iterations
-     */
-    public Online(
-            final int k,
-            final SimilarityInterface<T> similarity,
-            final JavaSparkContext sc,
-            final JavaPairRDD<Node<T>, NeighborList> initial_graph,
-            final int partitioning_medoids,
-            final int partitioning_iterations) {
-
         this.nodes_added_or_removed = 0;
         this.similarity = similarity;
         this.k = k;
@@ -131,36 +102,32 @@ public class Online<T> {
         // Use the distributed search algorithm to partition the graph
         this.searcher = new ApproximateSearch<T>(
                 initial_graph,
-                partitioning_iterations,
+                PARTITIONING_ITERATIONS,
                 partitioning_medoids,
                 similarity);
-
-        this.spark_context = sc;
 
         sc.setCheckpointDir("/tmp/checkpoints");
 
         this.partitions_size = getPartitionsSize(searcher.getGraph());
         this.previous_rdds = new LinkedList<JavaRDD<Graph<T>>>();
         this.nodes_before_update_medoids = computeNodesBeforeUpdate();
-
     }
 
     /**
-     * Unpersist all cached RDD's.
+     * Get the size of the window.
+     * @return
      */
-    public final void clean() {
-        for (JavaRDD<Graph<T>> rdd : previous_rdds) {
-            rdd.unpersist();
-        }
-        searcher.clean();
+    public final int getWindowSize() {
+        return window_size;
     }
 
     /**
-     * Set the update depth for fast adding or removing nodes (default is 2).
-     * @param update_depth
+     * Set the size of the window (for removing a point when a new point is
+     * added to graph).
+     * @param window_size
      */
-    public final void setUpdateDepth(final int update_depth) {
-        this.update_depth = update_depth;
+    public final void setWindowSize(final int window_size) {
+        this.window_size = window_size;
     }
 
     /**
@@ -179,24 +146,8 @@ public class Online<T> {
      * Set the speedup of the search step to add a node (default: 4).
      * @param search_speedup speedup
      */
-    public final void setSearchSpeedup(final double search_speedup) {
+    public final void setSearchSpeedup(final int search_speedup) {
         this.search_speedup = search_speedup;
-    }
-
-    /**
-     *
-     * @param search_random_jumps
-     */
-    public final void setSearchRandomJumps(final int search_random_jumps) {
-        this.search_random_jumps = search_random_jumps;
-    }
-
-    /**
-     *
-     * @param search_expansion
-     */
-    public final void setSearchExpansion(final double search_expansion) {
-        this.search_expansion = search_expansion;
     }
 
     /**
@@ -217,31 +168,18 @@ public class Online<T> {
      * @param node to add to the graph
      */
     public final void fastAdd(final Node<T> node) {
-        fastAdd(node, null);
-    }
 
-    /**
-     * Add a node to the graph using fast distributed algorithm.
-     * @param node to add to the graph
-     * @param stats_accumulator
-     */
-    public final void fastAdd(
-            final Node<T> node,
-            final Accumulator<StatisticsContainer> stats_accumulator) {
+        if (window_size != 0) {
+            fastRemove(
+                (Integer) node.getAttribute(NODE_SEQUENCE_KEY) - window_size);
+        }
 
         // Find the neighbors of this node
-        NeighborList neighborlist = searcher.search(
-                node,
-                k,
-                search_speedup,
-                search_random_jumps,
-                search_expansion,
-                stats_accumulator);
+        NeighborList neighborlist = searcher.search(node, k, search_speedup);
 
         // Assign the node to a partition (most similar medoid, with partition
         // size constraint)
         searcher.assign(node, partitions_size);
-        //similarities += k;
 
         // bookkeeping: update the counts
         partitions_size[(Integer) node
@@ -249,38 +187,29 @@ public class Online<T> {
 
         // update the existing graph edges
         JavaRDD<Graph<T>> updated_graph = searcher.getGraph().map(
-                    new UpdateFunction<T>(
-                            node,
-                            neighborlist,
-                            similarity,
-                            stats_accumulator,
-                            update_depth));
+                    new UpdateFunction<T>(node, neighborlist, similarity));
 
         // Add the new <Node, NeighborList> to the distributed graph
         updated_graph = updated_graph.map(new AddNode(node, neighborlist));
-        updated_graph = updated_graph.cache();
+
+        // From now on, use the new graph...
+        searcher.setGraph(updated_graph);
 
         //  truncate RDD DAG (would cause a stack overflow, even with caching)
-        if ((nodes_added_or_removed % ITERATIONS_BEFORE_CHECKPOINT) == 0) {
+        if ((nodes_added_or_removed % ITERATIONS_BETWEEN_CHECKPOINTS) == 0) {
             updated_graph.checkpoint();
         }
 
         // Keep a track of updated RDD to unpersist after two iterations
         previous_rdds.add(updated_graph);
-        if (nodes_added_or_removed > RDDS_TO_CACHE) {
+        if (nodes_added_or_removed > 2) {
             previous_rdds.pop().unpersist();
         }
 
-        // Force execution to get stats accumulator values
-        updated_graph.count();
-
-        // From now on use the new graph...
-        searcher.setGraph(updated_graph);
-
         nodes_added_or_removed++;
+
         nodes_before_update_medoids--;
         if (nodes_before_update_medoids == 0) {
-            // TODO: count number of computed similarities here!!
             searcher.getPartitioner().computeNewMedoids(updated_graph);
             nodes_before_update_medoids = computeNodesBeforeUpdate();
         }
@@ -289,12 +218,8 @@ public class Online<T> {
     /**
      * Remove a node using fast approximate algorithm.
      * @param node_to_remove
-     * @param stats_accumulator
      */
-    public final void fastRemove(
-            final Node<T> node_to_remove,
-            final Accumulator<StatisticsContainer> stats_accumulator) {
-
+    public final void fastRemove(final Node<T> node_to_remove) {
         // find the list of nodes to update
         List<Node<T>> nodes_to_update = searcher.getGraph()
                 .flatMap(new FindNodesToUpdate(node_to_remove))
@@ -310,9 +235,7 @@ public class Online<T> {
         LinkedList<Node<T>> candidates  =
                 new LinkedList<Node<T>>(
                         searcher.getGraph()
-                        .flatMap(new SearchNeighbors(
-                                initial_candidates,
-                                update_depth))
+                        .flatMap(new SearchNeighbors(initial_candidates))
                         .collect());
 
         // Find the partition corresponding to node_to_remove
@@ -336,21 +259,19 @@ public class Online<T> {
         while (candidates.contains(node_to_remove)) {
             candidates.remove(node_to_remove);
         }
-
-        // Update the graph and remove the node
+        // update the graph and remove the node
         JavaRDD<Graph<T>> updated_graph = searcher.getGraph()
                 .map(new RemoveUpdate(
                         node_to_remove,
                         nodes_to_update,
-                        candidates,
-                        stats_accumulator))
-                .cache();
+                        candidates));
+        searcher.setGraph(updated_graph);
 
         // bookkeeping: update the counts
         partitions_size[partition_of_node_to_remove]--;
 
         //  truncate RDD DAG (would cause a stack overflow, even with caching)
-        if ((nodes_added_or_removed % ITERATIONS_BEFORE_CHECKPOINT) == 0) {
+        if ((nodes_added_or_removed % ITERATIONS_BETWEEN_CHECKPOINTS) == 0) {
             updated_graph.checkpoint();
         }
 
@@ -361,11 +282,25 @@ public class Online<T> {
         }
 
         nodes_added_or_removed++;
+    }
 
-        // Force execution and use updated graph
-        updated_graph.count();
-        searcher.setGraph(updated_graph);
+    /**
+     * Remove a node using the node sequence number instead of the node itself.
+     * Used by the sliding window algorithm.
+     * @param node_sequence
+     */
+    private void fastRemove(final long node_sequence) {
+        // This is not really efficient :(
+        List<Node<T>> nodes = searcher.getGraph()
+                .flatMap(new FindNode(node_sequence))
+                .collect();
 
+        if (nodes.isEmpty()) {
+            System.out.println("Node sequence not found: " + node_sequence);
+            return;
+        }
+
+        fastRemove(nodes.get(0));
     }
 
     /**
@@ -406,6 +341,7 @@ public class Online<T> {
         }
 
         return (long) (getSize() * medoid_update_ratio);
+
     }
 }
 
@@ -416,6 +352,7 @@ public class Online<T> {
  * @param <T>
  */
 class SubgraphSizeFunction<T> implements Function<Graph<T>, Long> {
+
 
     public Long call(final Graph<T> subgraph) {
         return new Long(subgraph.size());
@@ -450,6 +387,34 @@ class AddNode<T> implements Function<Graph<T>, Graph<T>> {
 }
 
 /**
+ * Used to find the node corresponding to a given sequence number.
+ * @author Thibault Debatty
+ * @param <T>
+ */
+class FindNode<T> implements FlatMapFunction<Graph<T>, Node<T>> {
+    private final long sequence_number;
+
+    FindNode(final long sequence_number) {
+        this.sequence_number = sequence_number;
+    }
+
+    public Iterable<Node<T>> call(final Graph<T> subgraph) {
+
+        LinkedList<Node<T>> result = new LinkedList<Node<T>>();
+        for (Node<T> node : subgraph.getNodes()) {
+            Integer node_sequence = (Integer) node.getAttribute(
+                    Online.NODE_SEQUENCE_KEY);
+            //System.out.println(node_sequence);
+            if (node_sequence == sequence_number) {
+                result.add(node);
+                return result;
+            }
+        }
+        return result;
+    }
+}
+
+/**
  * Update the graph when adding a node.
  * @author Thibault Debatty
  * @param <T>
@@ -457,24 +422,20 @@ class AddNode<T> implements Function<Graph<T>, Graph<T>> {
 class UpdateFunction<T>
         implements Function<Graph<T>, Graph<T>> {
 
-    private final int update_depth;
+    private static final int UPDATE_DEPTH = 2;
+
     private final NeighborList neighborlist;
     private final SimilarityInterface<T> similarity;
     private final Node<T> node;
-    private final Accumulator<StatisticsContainer> stats_accumulator;
 
     UpdateFunction(
             final Node<T> node,
             final NeighborList neighborlist,
-            final SimilarityInterface<T> similarity,
-            final Accumulator<StatisticsContainer> stats_accumulator,
-            final int update_depth) {
+            final SimilarityInterface<T> similarity) {
 
         this.node = node;
         this.neighborlist = neighborlist;
         this.similarity = similarity;
-        this.stats_accumulator = stats_accumulator;
-        this.update_depth = update_depth;
     }
 
     public Graph<T> call(final Graph<T> local_graph) {
@@ -493,9 +454,7 @@ class UpdateFunction<T>
             analyze.add(neighbor.node);
         }
 
-        StatisticsContainer local_stats = new StatisticsContainer();
-
-        for (int depth = 0; depth < update_depth; depth++) {
+        for (int depth = 0; depth < UPDATE_DEPTH; depth++) {
             while (!analyze.isEmpty()) {
                 Node other = analyze.pop();
                 NeighborList other_neighborlist = local_graph.get(other);
@@ -520,17 +479,11 @@ class UpdateFunction<T>
                                 node.value,
                                 (T) other.value)));
 
-                local_stats.incAddSimilarities();
-
                 visited.put(other, Boolean.TRUE);
             }
 
             analyze = next_analyze;
             next_analyze = new LinkedList<Node<T>>();
-        }
-
-        if (stats_accumulator != null) {
-            stats_accumulator.add(local_stats);
         }
 
         return local_graph;
@@ -594,20 +547,16 @@ class FindNodesToUpdate<T> implements FlatMapFunction<Graph<T>, Node<T>> {
  * @param <T>
  */
 class SearchNeighbors<T> implements FlatMapFunction<Graph<T>, Node<T>> {
-    private final int search_depth;
+    private static final int SEARCH_DEPTH = 3;
 
     private final LinkedList<Node<T>> starting_points;
 
-    SearchNeighbors(
-            final LinkedList<Node<T>> initial_candidates,
-            final int search_depth) {
-
+    SearchNeighbors(final LinkedList<Node<T>> initial_candidates) {
         this.starting_points = initial_candidates;
-        this.search_depth = search_depth;
     }
 
     public Iterable<Node<T>> call(final Graph<T> subgraph) {
-        return subgraph.findNeighbors(starting_points, search_depth);
+        return subgraph.findNeighbors(starting_points, SEARCH_DEPTH);
     }
 }
 
@@ -621,24 +570,19 @@ class RemoveUpdate<T> implements Function<Graph<T>, Graph<T>> {
     private final Node<T> node_to_remove;
     private final List<Node<T>> nodes_to_update;
     private final List<Node<T>> candidates;
-    private final Accumulator<StatisticsContainer> stats_accumulator;
 
     RemoveUpdate(
             final Node<T> node_to_remove,
             final List<Node<T>> nodes_to_update,
-            final List<Node<T>> candidates,
-            final Accumulator<StatisticsContainer> stats_accumulator) {
+            final List<Node<T>> candidates) {
 
         this.node_to_remove = node_to_remove;
         this.nodes_to_update = nodes_to_update;
         this.candidates = candidates;
-        this.stats_accumulator = stats_accumulator;
 
     }
 
     public Graph<T> call(final Graph<T> subgraph) {
-
-        StatisticsContainer local_stats = new StatisticsContainer();
 
         // Remove the node (if present in this subgraph)
         subgraph.getHashMap().remove(node_to_remove);
@@ -659,17 +603,15 @@ class RemoveUpdate<T> implements Function<Graph<T>, Graph<T>> {
                 if (candidate.equals(node_to_update)) {
                     continue;
                 }
-
+                
                 double similarity = subgraph.getSimilarity().similarity(
                         node_to_update.value,
                         candidate.value);
-                local_stats.incRemoveSimilarities();
 
                 nl_to_update.add(new Neighbor(candidate, similarity));
             }
         }
 
-        stats_accumulator.add(local_stats);
         return subgraph;
     }
 }

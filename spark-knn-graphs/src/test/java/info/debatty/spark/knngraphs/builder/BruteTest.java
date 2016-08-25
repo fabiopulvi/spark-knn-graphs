@@ -27,7 +27,8 @@ package info.debatty.spark.knngraphs.builder;
 import info.debatty.java.graphs.Neighbor;
 import info.debatty.java.graphs.NeighborList;
 import info.debatty.java.graphs.Node;
-import info.debatty.spark.knngraphs.JWSimilarity;
+import info.debatty.java.graphs.SimilarityInterface;
+import info.debatty.java.stringsimilarity.JaroWinkler;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -47,9 +48,21 @@ import scala.Tuple2;
  */
 public class BruteTest extends TestCase implements Serializable {
 
-    private static final int K = 10;
+    public BruteTest(String testName) {
+        super(testName);
+    }
 
-    public final void testComputeGraph() throws IOException, Exception {
+    @Override
+    protected void setUp() throws Exception {
+        super.setUp();
+    }
+
+    @Override
+    protected void tearDown() throws Exception {
+        super.tearDown();
+    }
+
+    public void testComputeGraph() throws IOException, Exception {
 
         Logger.getLogger("org").setLevel(Level.WARN);
         Logger.getLogger("akka").setLevel(Level.WARN);
@@ -76,12 +89,17 @@ public class BruteTest extends TestCase implements Serializable {
         JavaRDD<Node<String>> nodes = sc.parallelize(data);
 
         Brute brute = new Brute();
-        brute.setK(K);
-        brute.setSimilarity(new JWSimilarity());
+        brute.setK(10);
+        brute.setSimilarity(new SimilarityInterface<String>() {
+
+            public double similarity(String value1, String value2) {
+                JaroWinkler jw = new JaroWinkler();
+                return jw.similarity(value1, value2);
+            }
+        });
 
         // Compute the graph and force execution
-        JavaPairRDD<Node<String>, NeighborList> graph =
-                brute.computeGraph(nodes);
+        JavaPairRDD<Node<String>, NeighborList> graph = brute.computeGraph(nodes);
         graph.first();
         List<Tuple2<Node<String>, NeighborList>> local_graph = graph.collect();
 
@@ -98,5 +116,3 @@ public class BruteTest extends TestCase implements Serializable {
     }
 
 }
-
-
