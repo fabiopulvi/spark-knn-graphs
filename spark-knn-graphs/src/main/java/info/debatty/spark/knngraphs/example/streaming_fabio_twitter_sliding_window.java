@@ -39,7 +39,7 @@ import java.util.List;
  *
  * @author Fabio
  *
- * This class is very similar to "spam_sliding_window". It retrieve data from twitter (here the personal data
+ * This class is very similar to "spam_sliding_window". It retrieves data from twitter (here the personal data
  * to access twitter API are hidden). No need to use the tcp event generator.
  */
 public class streaming_fabio_twitter_sliding_window {
