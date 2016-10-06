@@ -38,7 +38,9 @@ import static java.lang.Boolean.TRUE;
  *
  * @author Fabio
  * This is very similar to spam_timestamp . The only difference is that in this class the nodes are
- * added to the graph WHEN they arrive. The deletion is done, instead, at the end of the batch.
+ * added to the graph WHEN they arrive. The deletion is done, instead, at the end of the batch 
+ * (there is a window routine ad hoc)
+ * Since it is a minibatch based, not clear which is the difference.
  * TO DO: remove the nodes live and not at the end of the batch to delete the delay.
  */
 public class streaming_fabio_spam_live {
