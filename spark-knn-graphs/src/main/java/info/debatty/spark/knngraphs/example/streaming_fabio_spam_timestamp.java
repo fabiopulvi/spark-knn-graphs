@@ -37,14 +37,15 @@ import static java.lang.Boolean.TRUE;
  * @author Fabio
  *
  * this class should be run together with a tcp streaming event source
- * it modify the graph (adding and deleting the nodes at the end of the batch)
- * but the deletion is now handled in a time-wise fashion
+ * it modifies the graph (adding and deleting the nodes at the end of the batch)
+ * but the deletion is now handled in a time-wise fashion (not in 1 in and one out)
  * with a sliding window of a certain period - all the nodes are collected in a local stack fifo
+ 
  * from this point of view. do we really need to store the timestamp information in the graph?
 
  */
 //
-    // it modify the graph (adding and deleting the nodes at the end of the batch) but the deleting is now
+    
 
 public class streaming_fabio_spam_timestamp {
 
